@@ -1,0 +1,74 @@
+/*
+ * Copyright 2018 ConsenSys AG.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
+ * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations under the License.
+ */
+
+apply plugin: 'java-library'
+
+jar {
+  archiveBaseName = 'ethsigner-core'
+  manifest {
+    attributes(
+      'Specification-Title': archiveBaseName,
+      'Specification-Version': project.version,
+      'Implementation-Title': archiveBaseName,
+      'Implementation-Version': calculateVersion()
+      )
+  }
+}
+
+
+dependencies {
+  implementation 'tech.pegasys.signers.internal:signing-secp256k1-api'
+  implementation 'tech.pegasys.signers.internal:signing-secp256k1-impl'
+  implementation 'com.google.guava:guava'
+  implementation 'org.apache.logging.log4j:log4j-api'
+  implementation 'org.web3j:crypto'
+  implementation 'org.web3j:besu'
+  implementation 'io.vertx:vertx-core'
+  implementation 'io.vertx:vertx-web'
+  compile 'io.vertx:vertx-web-client:4.1.0'
+  compile 'org.apache.tuweni:tuweni-net'
+  implementation project(':metrics:core')
+  implementation project(':plugin-api')
+
+
+  runtimeOnly 'org.apache.logging.log4j:log4j-core'
+  runtimeOnly 'org.apache.logging.log4j:log4j-slf4j-impl'
+  runtimeOnly 'org.bouncycastle:bcpkix-jdk15on'
+
+  testImplementation 'io.vertx:vertx-codegen'
+  testImplementation 'org.junit.jupiter:junit-jupiter-api'
+  testImplementation 'org.junit.jupiter:junit-jupiter-params'
+  testImplementation 'org.assertj:assertj-core'
+  testImplementation 'org.mockito:mockito-core'
+  testImplementation 'org.mockito:mockito-junit-jupiter'
+  testImplementation 'tech.pegasys.signers.internal:signing-secp256k1-impl'
+
+  testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine'
+
+
+
+  integrationTestImplementation 'tech.pegasys.signers.internal:signing-secp256k1-impl'
+  integrationTestImplementation 'org.junit.jupiter:junit-jupiter-api'
+  integrationTestImplementation 'org.junit.jupiter:junit-jupiter-params'
+  integrationTestImplementation 'io.rest-assured:rest-assured'
+  integrationTestImplementation 'org.assertj:assertj-core'
+  integrationTestImplementation('org.mock-server:mockserver-netty') {
+    // mock-server includes a dependency on junit 4 for a junit rule which we aren't using
+    exclude group: 'junit', module: 'junit'
+  }
+  integrationTestImplementation 'org.mockito:mockito-core'
+  integrationTestImplementation 'org.mockito:mockito-junit-jupiter'
+  integrationTestImplementation 'org.awaitility:awaitility'
+
+  integrationTestRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine'
+}

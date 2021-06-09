@@ -1,0 +1,41 @@
+
+jar {
+  archiveBaseName = 'ethsigner-commandline'
+  manifest {
+    attributes(
+      'Specification-Title': archiveBaseName,
+      'Specification-Version': project.version,
+      'Implementation-Title': archiveBaseName,
+      'Implementation-Version': calculateVersion()
+      )
+  }
+}
+
+dependencies {
+
+  implementation project(':ethsigner:core')
+  implementation 'tech.pegasys.signers.internal:signing-secp256k1-api'
+  implementation 'tech.pegasys.signers.internal:signing-secp256k1-impl'
+  implementation 'info.picocli:picocli'
+  implementation 'com.google.guava:guava'
+  implementation 'org.apache.logging.log4j:log4j-api'
+  implementation 'org.apache.logging.log4j:log4j-core'
+  compile 'org.apache.tuweni:tuweni-toml'
+  implementation project(':metrics:core')
+  implementation project(':plugin-api')
+
+  runtimeOnly 'org.apache.logging.log4j:log4j-slf4j-impl'
+
+  testImplementation 'org.junit.jupiter:junit-jupiter-api'
+  testImplementation 'org.junit.jupiter:junit-jupiter-params'
+  testImplementation 'org.assertj:assertj-core'
+  testImplementation 'org.mockito:mockito-junit-jupiter'
+
+  testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine'
+
+  testSupportImplementation 'org.assertj:assertj-core'
+}
+
+artifacts {
+  testSupportArtifacts testSupportJar
+}

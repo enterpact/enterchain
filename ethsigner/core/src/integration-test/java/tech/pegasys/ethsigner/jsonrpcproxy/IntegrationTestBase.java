@@ -1,0 +1,364 @@
+/*
+ * Copyright 2019 ConsenSys AG.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
+ * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations under the License.
+ */
+package tech.pegasys.ethsigner.jsonrpcproxy;
+
+import static io.restassured.RestAssured.given;
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.Collections.emptyList;
+import static java.util.Collections.emptySet;
+import static java.util.Collections.singletonList;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockserver.integration.ClientAndServer.startClientAndServer;
+import static org.mockserver.matchers.Times.exactly;
+import static org.mockserver.model.HttpRequest.request;
+import static org.mockserver.model.HttpResponse.response;
+import static org.mockserver.model.JsonBody.json;
+import static org.web3j.utils.Async.defaultExecutorService;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.net.URL;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.Map.Entry;
+import java.util.Properties;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
+
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.io.Resources;
+import io.restassured.RestAssured;
+import io.restassured.response.Response;
+import io.vertx.core.Vertx;
+import io.vertx.core.http.HttpClientOptions;
+import io.vertx.core.http.HttpServerOptions;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.awaitility.Awaitility;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.io.TempDir;
+import org.mockserver.integration.ClientAndServer;
+import org.mockserver.model.JsonBody;
+import org.mockserver.model.RegexBody;
+import org.web3j.crypto.Credentials;
+import org.web3j.crypto.WalletUtils;
+import org.web3j.protocol.Web3j;
+import org.web3j.protocol.core.JsonRpc2_0Web3j;
+import org.web3j.protocol.eea.Eea;
+import org.web3j.protocol.eea.JsonRpc2_0Eea;
+import tech.pegasys.ethsigner.core.AddressIndexedSignerProvider;
+import tech.pegasys.ethsigner.core.Runner;
+import tech.pegasys.ethsigner.core.jsonrpc.JsonDecoder;
+import tech.pegasys.ethsigner.core.metrics.MetricsEndpoint;
+import tech.pegasys.ethsigner.core.requesthandler.sendtransaction.DownstreamPathCalculator;
+import tech.pegasys.ethsigner.jsonrpcproxy.model.request.EthNodeRequest;
+import tech.pegasys.ethsigner.jsonrpcproxy.model.request.EthRequestFactory;
+import tech.pegasys.ethsigner.jsonrpcproxy.model.request.EthSignerRequest;
+import tech.pegasys.ethsigner.jsonrpcproxy.model.response.EthNodeResponse;
+import tech.pegasys.ethsigner.jsonrpcproxy.model.response.EthResponseFactory;
+import tech.pegasys.ethsigner.jsonrpcproxy.model.response.EthSignerResponse;
+import tech.pegasys.ethsigner.jsonrpcproxy.support.MockServer;
+import tech.pegasys.ethsigner.jsonrpcproxy.support.RestAssuredConverter;
+import tech.pegasys.signers.secp256k1.api.Signer;
+import tech.pegasys.signers.secp256k1.api.SingleSignerProvider;
+import tech.pegasys.signers.secp256k1.filebased.FileBasedSignerFactory;
+
+public class IntegrationTestBase {
+
+  private static final Logger LOG = LogManager.getLogger();
+  private static final String PORTS_FILENAME = "ethsigner.ports";
+  private static final String HTTP_JSON_RPC_KEY = "http-jsonrpc";
+  private static final String LOCALHOST = "127.0.0.1";
+  public static final long DEFAULT_CHAIN_ID = 9;
+  public static final int DEFAULT_ID = 77;
+
+  static final String MALFORMED_JSON = "{Bad Json: {{{}";
+
+  private static Vertx vertx;
+  private static Runner runner;
+  static ClientAndServer clientAndServer;
+  static Credentials credentials;
+
+  private JsonRpc2_0Web3j jsonRpc;
+  private JsonRpc2_0Eea eeaJsonRpc;
+
+  protected final EthRequestFactory request = new EthRequestFactory();
+  protected final EthResponseFactory response = new EthResponseFactory();
+
+  static String unlockedAccount;
+
+  private static final Duration downstreamTimeout = Duration.ofSeconds(1);
+
+  @TempDir static Path dataPath;
+
+  static void setupEthSigner(final long chainId) throws Exception {
+    setupEthSigner(chainId, "");
+  }
+
+  static void setupEthSigner(final long chainId, final String downstreamHttpRequestPath)
+      throws Exception {
+    clientAndServer = startClientAndServer();
+
+    final File keyFile = createKeyFile();
+    final File passwordFile = createFile("password");
+    credentials = WalletUtils.loadCredentials("password", keyFile);
+
+    final AddressIndexedSignerProvider transactionSignerProvider =
+        AddressIndexedSignerProvider.create(
+            new SingleSignerProvider(signer(keyFile, passwordFile)));
+
+    final HttpClientOptions httpClientOptions = new HttpClientOptions();
+    httpClientOptions.setDefaultHost(LOCALHOST);
+    httpClientOptions.setDefaultPort(clientAndServer.getLocalPort());
+
+    final HttpServerOptions httpServerOptions = new HttpServerOptions();
+    httpServerOptions.setPort(0);
+    httpServerOptions.setHost("localhost");
+
+    // Force TransactionDeserialisation to fail
+    final ObjectMapper jsonObjectMapper = new ObjectMapper();
+    jsonObjectMapper.configure(DeserializationFeature.FAIL_ON_NULL_CREATOR_PROPERTIES, true);
+    jsonObjectMapper.configure(DeserializationFeature.FAIL_ON_MISSING_CREATOR_PROPERTIES, true);
+
+    final JsonDecoder jsonDecoder = new JsonDecoder(jsonObjectMapper);
+
+    vertx = Vertx.vertx();
+    runner =
+        new Runner(
+            chainId,
+            transactionSignerProvider,
+            httpClientOptions,
+            httpServerOptions,
+            downstreamTimeout,
+            new DownstreamPathCalculator(downstreamHttpRequestPath),
+            jsonDecoder,
+            dataPath,
+            vertx,
+            singletonList("sample.com"),
+            new MetricsEndpoint(false, 0, "", emptySet(), emptyList()));
+    runner.start();
+
+    final Path portsFile = dataPath.resolve(PORTS_FILENAME);
+    waitForNonEmptyFileToExist(portsFile);
+    final int ethSignerPort = httpJsonRpcPort(portsFile);
+    RestAssured.port = ethSignerPort;
+
+    LOG.info(
+        "Started ethSigner on port {}, eth stub node on port {}",
+        ethSignerPort,
+        clientAndServer.getLocalPort());
+
+    unlockedAccount =
+        transactionSignerProvider.availableAddresses().stream().findAny().orElseThrow();
+  }
+
+  Web3j jsonRpc() {
+    return jsonRpc;
+  }
+
+  Eea eeaJsonRpc() {
+    return eeaJsonRpc;
+  }
+
+  @BeforeEach
+  public void setup() {
+    jsonRpc = new JsonRpc2_0Web3j(null, 2000, defaultExecutorService());
+    eeaJsonRpc = new JsonRpc2_0Eea(null);
+    if (clientAndServer.isRunning()) {
+      clientAndServer.reset();
+    }
+  }
+
+  @AfterAll
+  public static void teardown() {
+    clientAndServer.stop();
+    vertx.close();
+    clientAndServer = null;
+    runner = null;
+  }
+
+  void setUpEthNodeResponse(final EthNodeRequest request, final EthNodeResponse response) {
+    clientAndServer
+        .when(request().withBody(json(request.getBody())), exactly(1))
+        .respond(
+            response()
+                .withBody(response.getBody())
+                .withHeaders(MockServer.headers(response.getHeaders()))
+                .withStatusCode(response.getStatusCode()));
+  }
+
+  void setupEthNodeResponse(
+      final String bodyRegex, final EthNodeResponse response, final int count) {
+    clientAndServer
+        .when(request().withBody(new RegexBody(bodyRegex)), exactly(count))
+        .respond(
+            response()
+                .withBody(response.getBody())
+                .withHeaders(MockServer.headers(response.getHeaders()))
+                .withStatusCode(response.getStatusCode()));
+  }
+
+  void timeoutRequest(final String bodyRegex) {
+    final int ENSURE_TIMEOUT = 5;
+    clientAndServer
+        .when(request().withBody(new RegexBody(bodyRegex)))
+        .respond(
+            response()
+                .withDelay(TimeUnit.MILLISECONDS, downstreamTimeout.toMillis() + ENSURE_TIMEOUT));
+  }
+
+  void timeoutRequest(final EthNodeRequest request) {
+    final int ENSURE_TIMEOUT = 5;
+    clientAndServer
+        .when(request().withBody(json(request.getBody())), exactly(1))
+        .respond(
+            response()
+                .withDelay(TimeUnit.MILLISECONDS, downstreamTimeout.toMillis() + ENSURE_TIMEOUT));
+  }
+
+  void sendPostRequestAndVerifyResponse(
+      final EthSignerRequest request, final EthSignerResponse expectResponse) {
+    sendPostRequestAndVerifyResponse(request, expectResponse, "/");
+  }
+
+  void sendPostRequestAndVerifyResponse(
+      final EthSignerRequest request, final EthSignerResponse expectResponse, final String path) {
+
+    final Response response =
+        given()
+            .when()
+            .body(request.getBody())
+            .headers(RestAssuredConverter.headers(request.getHeaders()))
+            .post(path);
+
+    verifyResponseMatchesExpected(response, expectResponse);
+  }
+
+  void sendPutRequestAndVerifyResponse(
+      final EthSignerRequest request, final EthSignerResponse expectResponse, final String path) {
+    final Response response =
+        given()
+            .when()
+            .body(request.getBody())
+            .headers(RestAssuredConverter.headers(request.getHeaders()))
+            .put(path);
+
+    verifyResponseMatchesExpected(response, expectResponse);
+  }
+
+  void sendGetRequestAndVerifyResponse(
+      final EthSignerRequest request, final EthSignerResponse expectResponse, final String path) {
+    final Response response =
+        given()
+            .when()
+            .body(request.getBody())
+            .headers(RestAssuredConverter.headers(request.getHeaders()))
+            .get(path);
+
+    verifyResponseMatchesExpected(response, expectResponse);
+  }
+
+  void sendDeleteRequestAndVerifyResponse(
+      final EthSignerRequest request, final EthSignerResponse expectResponse, final String path) {
+    final Response response =
+        given()
+            .when()
+            .body(request.getBody())
+            .headers(RestAssuredConverter.headers(request.getHeaders()))
+            .delete(path);
+    verifyResponseMatchesExpected(response, expectResponse);
+  }
+
+  private void verifyResponseMatchesExpected(
+      final Response response, final EthSignerResponse expectResponse) {
+    assertThat(response.statusCode()).isEqualTo(expectResponse.getStatusCode());
+    assertThat(response.headers())
+        .containsAll(RestAssuredConverter.headers(expectResponse.getHeaders()));
+    assertThat(response.body().print()).isEqualTo(expectResponse.getBody());
+  }
+
+  void verifyEthNodeReceived(final String proxyBodyRequest) {
+    clientAndServer.verify(
+        request()
+            .withBody(JsonBody.json(proxyBodyRequest))
+            .withHeaders(MockServer.headers(emptyList())));
+  }
+
+  void verifyEthNodeReceived(
+      final Iterable<Entry<String, String>> headers, final String proxyBodyRequest) {
+    clientAndServer.verify(
+        request().withBody(proxyBodyRequest).withHeaders(MockServer.headers(headers)));
+  }
+
+  void verifyEthNodeReceived(
+      final Iterable<Entry<String, String>> headers,
+      final String proxyBodyRequest,
+      final String path) {
+    clientAndServer.verify(
+        request()
+            .withPath(path)
+            .withBody(JsonBody.json(proxyBodyRequest))
+            .withHeaders(MockServer.headers(headers)));
+  }
+
+  private static Signer signer(final File keyFile, final File passwordFile) {
+    return FileBasedSignerFactory.createSigner(keyFile.toPath(), passwordFile.toPath());
+  }
+
+  @SuppressWarnings("UnstableApiUsage")
+  private static File createKeyFile() throws IOException {
+    final URL walletResource = Resources.getResource("keyfile.json");
+    final Path wallet = Files.createTempFile("ethsigner_intg_keyfile", ".json");
+    Files.write(wallet, Resources.toString(walletResource, UTF_8).getBytes(UTF_8));
+    final File keyFile = wallet.toFile();
+    keyFile.deleteOnExit();
+    return keyFile;
+  }
+
+  private static File createFile(final String s) throws IOException {
+    final Path path = Files.createTempFile("file", ".file");
+    Files.write(path, s.getBytes(UTF_8));
+    final File file = path.toFile();
+    file.deleteOnExit();
+    return file;
+  }
+
+  private static int httpJsonRpcPort(final Path portsFile) {
+    try (final FileInputStream fis = new FileInputStream(portsFile.toString())) {
+      final Properties portProperties = new Properties();
+      portProperties.load(fis);
+      final String value = portProperties.getProperty(HTTP_JSON_RPC_KEY);
+      return Integer.parseInt(value);
+    } catch (final IOException e) {
+      throw new RuntimeException("Error reading Web3Provider ports file", e);
+    }
+  }
+
+  private static void waitForNonEmptyFileToExist(final Path path) {
+    final File file = path.toFile();
+    Awaitility.waitAtMost(30, TimeUnit.SECONDS)
+        .until(
+            () -> {
+              if (file.exists()) {
+                try (final Stream<String> s = Files.lines(file.toPath())) {
+                  return s.count() > 0;
+                }
+              }
+              return false;
+            });
+  }
+}
